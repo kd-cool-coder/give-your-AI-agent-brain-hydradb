@@ -1,0 +1,3 @@
+hydradb-sdk>=2.1.0,<3
+openai
+python-dotenv
