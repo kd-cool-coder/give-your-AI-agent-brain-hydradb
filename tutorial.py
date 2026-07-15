@@ -35,9 +35,9 @@ def score_text(score):
 def wait_for_indexing(client, database, ids, collection=None, timeout=300):
     start = time.time()
     while time.time() - start < timeout:
-        status_kwargs = {"tenant_id": database, "ids": ids}
+        status_kwargs = {"database": database, "ids": ids}
         if collection is not None:
-            status_kwargs["sub_tenant_id"] = collection
+            status_kwargs["collection"] = collection
 
         status = client.context.status(**status_kwargs)
         items = status.data.statuses
@@ -107,21 +107,6 @@ James: The March 12 incident (INC-2025-0312) was v1 connection exhaustion under 
 That postmortem recommended this migration. Link the timeline so on-call knows.
 """
 
-    slack_thread = """#payments-eng - v1 Deprecation Timeline
-[2025-04-10 09:14] @sarah.chen: Migration tracking spreadsheet is live.
-billing-service target: June 30. checkout-service target: July 15.
-invoice-generator target: August 1.
-
-[2025-04-10 09:32] @priya.patel: Billing will need a feature flag for the cutover.
-We're calling it `use_payments_v2`. Can't do a hard switch mid-billing-cycle.
-
-[2025-04-10 10:05] @james.wright: SRE will keep v1 monitoring active until all
-services confirm migration. Dashboard: go/payments-v1-deprecation
-
-[2025-04-15 14:22] @mike.torres: checkout-service PR is up - only 3 call sites.
-Targeting merge by April 25. After that, billing is the only hard blocker.
-"""
-
     postmortem = """# Incident Postmortem: INC-2025-0312
 **Severity:** SEV-2 | **Duration:** 47 minutes | **Date:** 2025-03-12
 **Service:** payments-api-v1 | **On-call:** James Wright (SRE)
@@ -140,37 +125,137 @@ Temporarily increased pool ceiling to 1000. Permanent fix: migrate to v2 API
 which uses persistent connection pooling (see ADR-007).
 """
 
-    docs = [
-        ("adr_007", "adr_007.md", adr_007, {"document_type": "adr", "service": "payments"}),
-        (
-            "meeting_notes",
-            "meeting_notes.md",
-            meeting_notes,
-            {"document_type": "meeting_notes", "service": "payments"},
+    source_ids = []
+
+    adr_result = client.context.ingest(
+        database=DATABASE,
+        collection=SHARED_COLLECTION,
+        type="knowledge",
+        documents=text_file("adr_007.md", adr_007),
+        document_metadata=json.dumps(
+            [
+                {
+                    "id": "adr_007",
+                    "title": "ADR-007: Payments API v1 to v2 Migration",
+                    "additional_metadata": {"document_type": "adr", "service": "payments"},
+                }
+            ]
         ),
-        (
-            "slack_thread",
-            "slack_thread.txt",
-            slack_thread,
-            {"document_type": "slack_thread", "service": "payments"},
-        ),
-        ("postmortem", "postmortem.md", postmortem, {"document_type": "postmortem", "service": "payments"}),
+        upsert="true",
+    )
+    source_ids.extend([r.id for r in adr_result.data.results])
+    print(f"Ingested ADR: {adr_result.data.results[0].id}")
+
+    slack_messages = [
+        {
+            "id": "slack_payments_eng_20250410_0914",
+            "external_id": "1744276440.000100",
+            "body": "Migration tracking spreadsheet is live. billing-service target: June 30. checkout-service target: July 15. invoice-generator target: August 1.",
+            "author": "sarah.chen",
+            "created_at": "2025-04-10T09:14:00Z",
+        },
+        {
+            "id": "slack_payments_eng_20250410_0932",
+            "external_id": "1744277520.000200",
+            "body": "Billing will need a feature flag for the cutover. We're calling it `use_payments_v2`. Can't do a hard switch mid-billing-cycle.",
+            "author": "priya.patel",
+            "created_at": "2025-04-10T09:32:00Z",
+            "parent_id": "1744276440.000100",
+        },
+        {
+            "id": "slack_payments_eng_20250410_1005",
+            "external_id": "1744279500.000300",
+            "body": "SRE will keep v1 monitoring active until all services confirm migration. Dashboard: go/payments-v1-deprecation",
+            "author": "james.wright",
+            "created_at": "2025-04-10T10:05:00Z",
+            "parent_id": "1744276440.000100",
+        },
+        {
+            "id": "slack_payments_eng_20250415_1422",
+            "external_id": "1744726920.000400",
+            "body": "checkout-service PR is up - only 3 call sites. Targeting merge by April 25. After that, billing is the only hard blocker.",
+            "author": "mike.torres",
+            "created_at": "2025-04-15T14:22:00Z",
+            "parent_id": "1744276440.000100",
+        },
+    ]
+    thread_id = slack_messages[0]["external_id"]
+
+    app_sources = [
+        {
+            "id": "meeting_notes",
+            "database": DATABASE,
+            "collection": SHARED_COLLECTION,
+            "title": "Architecture Review: Payments v1 Deprecation",
+            "type": "internal_notes",
+            "kind": "knowledge_base",
+            "provider": "some_internal_notes_provider",
+            "external_id": "arch-review-payments-v1-2025-04-02",
+            "timestamp": "2025-04-02T00:00:00Z",
+            "fields": {
+                "kind": "knowledge_base",
+                "title": "Architecture Review: Payments v1 Deprecation",
+                "body": meeting_notes,
+                "created_by": "sarah.chen",
+                "created_at": "2025-04-02T00:00:00Z",
+            },
+            "metadata": {"document_type": "meeting_notes", "service": "payments"},
+        },
+        *[
+            {
+                "id": message["id"],
+                "database": DATABASE,
+                "collection": SHARED_COLLECTION,
+                "title": "#payments-eng - v1 Deprecation Timeline",
+                "type": "slack",
+                "kind": "message",
+                "provider": "slack",
+                "external_id": message["external_id"],
+                "timestamp": message["created_at"],
+                "fields": {
+                    "kind": "message",
+                    "body": message["body"],
+                    "author": message["author"],
+                    "thread_id": thread_id,
+                    "created_at": message["created_at"],
+                    **({"parent_id": message["parent_id"]} if "parent_id" in message else {}),
+                },
+                "metadata": {"document_type": "slack_thread", "service": "payments", "channel": "payments-eng"},
+            }
+            for message in slack_messages
+        ],
+        {
+            "id": "postmortem",
+            "database": DATABASE,
+            "collection": SHARED_COLLECTION,
+            "title": "Incident Postmortem: INC-2025-0312",
+            "type": "jira",
+            "kind": "ticket",
+            "provider": "jira",
+            "external_id": "INC-2025-0312",
+            "timestamp": "2025-03-12T00:00:00Z",
+            "fields": {
+                "kind": "ticket",
+                "title": "Incident Postmortem: INC-2025-0312",
+                "description": postmortem,
+                "status": "resolved",
+                "priority": "sev-2",
+                "assignee": "james.wright",
+                "created_at": "2025-03-12T00:00:00Z",
+            },
+            "metadata": {"document_type": "postmortem", "service": "payments", "incident_id": "INC-2025-0312"},
+        },
     ]
 
-    source_ids = []
-    for doc_id, filename, content, metadata in docs:
-        result = client.context.ingest(
-            tenant_id=DATABASE,
-            sub_tenant_id=SHARED_COLLECTION,
-            type="knowledge",
-            documents=text_file(filename, content),
-            document_metadata=json.dumps(
-                [{"id": doc_id, "title": filename, "additional_metadata": metadata}]
-            ),
-            upsert="true",
-        )
-        source_ids.extend([r.id for r in result.data.results])
-        print(f"Ingested {filename}: {result.data.results[0].id}")
+    app_result = client.context.ingest(
+        database=DATABASE,
+        collection=SHARED_COLLECTION,
+        type="knowledge",
+        app_knowledge=json.dumps(app_sources),
+        upsert="true",
+    )
+    source_ids.extend([r.id for r in app_result.data.results])
+    print(f"Ingested {len(app_sources)} app sources")
 
     return source_ids
 
@@ -262,8 +347,8 @@ def ingest_manifest_graph(client):
     }
 
     result = client.context.ingest(
-        tenant_id=DATABASE,
-        sub_tenant_id=SHARED_COLLECTION,
+        database=DATABASE,
+        collection=SHARED_COLLECTION,
         type="knowledge",
         documents=text_file("service_manifest.md", manifest_text),
         document_metadata=json.dumps(
@@ -295,6 +380,7 @@ def compare_graph_retrieval(client):
         mode="fast",
         max_results=10,
         graph_context=False,
+        query_apps=True,
     )
 
     chunks = result_no_graph.data.chunks or []
@@ -312,6 +398,7 @@ def compare_graph_retrieval(client):
         type="knowledge",
         query_by="hybrid",
         graph_context=True,
+        query_apps=True,
         mode="thinking",
         max_results=10,
     )
@@ -414,8 +501,8 @@ def ingest_persona_memories(client):
     memory_ids_by_collection = {}
     for collection, memories in [("backend_engineer", engineer_memories), ("eng_manager", manager_memories)]:
         result = client.context.ingest(
-            tenant_id=DATABASE,
-            sub_tenant_id=collection,
+            database=DATABASE,
+            collection=collection,
             type="memory",
             memories=json.dumps(memories),
             upsert="true",
@@ -434,6 +521,7 @@ def query_with_personas(client):
             type="all",
             collections={SHARED_COLLECTION: 1.0, persona: 1.0},
             graph_context=True,
+            query_apps=True,
             query_by="hybrid",
             mode="thinking",
             max_results=10,
